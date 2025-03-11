@@ -4,7 +4,9 @@ from sonar import *
 # import Mpu6050
 import ros_robot_controller_sdk as rrc
 import threading
-
+import csv
+import ast
+import json
 
 print('''
 **********************************************************
@@ -55,7 +57,7 @@ evenLegs = [4, 10, 16]
 evenVerts = [5, 11, 17]
 oddVerts = [2, 8, 14]
 
-runTimeForwardBack = 0.3
+runTimeForwardBack = 0.4
 runTimeUpDown = 0.2
 runTimeSonar = 0.05
 
@@ -325,20 +327,34 @@ def initRobot():
     return
 
 
-initRobot()
+
+
+# Initialize sensors
 s = Sonar()
-board = Board()
+#initRobot()
+# Get trial number and terrain type from user
+trial_num = input("Enter trial number: ")
+#terrain_type = input("Enter terrain type: ")
+
+# CSV file name
+csv_filename = "DemoData.csv"
+
+# Shared storage for collected data
+velocity_readings = []
+imu_readings = []
+stop_event = threading.Event()  # Event to signal when recording is done
+total_time_elapsed = 0  # Variable to store total elapsed time
 
 # Walk gait function (runs indefinitely until stopped)
 def walk_gait():
-    while True:
+    while not stop_event.is_set():
         walkForward()
 
 # Record velocity and IMU data over time
 def record_motion_data():
-    velocity_readings = []
-    imu_readings = []
-
+    global total_time_elapsed  # Access the global variable
+    start_time = time.time()
+    
     while True:
         # Get velocity from sonar
         velocity = s.getDistance()
@@ -348,17 +364,40 @@ def record_motion_data():
         imu_data = board.get_imu()
         if imu_data:
             print("Got IMU data: ", imu_data)
-            ax, ay, az, gx, gy, gz = imu_data
-            imu_readings.append((ax, ay, az, gx, gy, gz))
+            imu_readings.append([imu_data[0], imu_data[1], imu_data[2], imu_data[3], imu_data[4], imu_data[5]])
 
         # Exit condition: Stop both threads if velocity is below 500
-        if velocity < 500:
-            print("Velocity below threshold. Stopping threads.")
+        if velocity < 350:
+            total_time_elapsed = time.time() - start_time  # Calculate total elapsed time
+            print(f"Velocity below threshold. Stopping threads. Total time elapsed: {total_time_elapsed:.2f} seconds.")
+            stop_event.set()  # Signal the walk_gait thread to stop
             break
 
-        time.sleep(1)  # Sample every second
+        time.sleep(0.05)  # Sample every second
 
-    return velocity_readings, imu_readings
+# Function to save data to CSV
+def save_to_csv():
+    # Read existing data (if any) to preserve previous entries
+    try:
+        with open(csv_filename, "r") as file:
+            reader = csv.reader(file)
+            data = list(reader)
+    except FileNotFoundError:
+        data = [["Trial #", "Velocity Readings", "IMU Readings", "Time to End"]]
+
+    # Convert arrays to JSON format for single-cell storage
+    velocity_str = json.dumps(velocity_readings)
+    imu_str = json.dumps(imu_readings)
+
+    # Append new trial data
+    data.append([trial_num, velocity_str, imu_str, f"{total_time_elapsed:.2f}"])
+
+    # Write back to CSV
+    with open(csv_filename, "w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerows(data)
+
+    print(f"Trial {trial_num} data saved to {csv_filename}")
 
 # Main function with threading
 if __name__ == "__main__":
@@ -366,12 +405,18 @@ if __name__ == "__main__":
     walk_thread = threading.Thread(target=walk_gait)
     record_thread = threading.Thread(target=record_motion_data)
 
-    walk_thread.daemon = True
-    record_thread.daemon = True
-
     walk_thread.start()
     record_thread.start()
 
     # Wait for recording thread to finish (since it contains the stop condition)
     record_thread.join()
+
+    # Now we ensure CSV writing is done before exiting
+    save_to_csv()
+
+    # Wait for walking thread to finish (it should stop when stop_event is set)
+    walk_thread.join()
+    
     print("Data collection finished. Exiting program.")
+    initRobot()
+
